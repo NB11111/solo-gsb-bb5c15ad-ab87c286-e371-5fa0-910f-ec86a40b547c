@@ -77,12 +77,17 @@ docker compose up --build -d
 
 | 入口 | 地址 |
 | --- | --- |
+| API 基地址（所有业务接口此前缀） | `http://localhost:8000/api/v1` |
 | 健康检查 | <http://localhost:8000/health> |
 | Swagger 交互文档 | <http://localhost:8000/docs> |
 | ReDoc 文档 | <http://localhost:8000/redoc> |
 
 > 想换宿主机端口：编辑 `docker-compose.yml` 的 `ports`，例如
 > `"9000:8000"` 后访问 9000 端口。容器内固定监听 8000。
+
+**必要配置**：无需任何外部服务或必填环境变量即可启动；唯一可配置项为
+幂等缓存路径 `REACTION_CACHE_DB`（Compose 中已默认设为
+`/data/reactions.db`）。
 
 **缓存持久卷**：幂等缓存（SQLite，库文件 `/data/reactions.db`，可由环境变量
 `REACTION_CACHE_DB` 覆盖）保存在 Compose 命名卷 `reaction-balancer-cache` 上。
@@ -422,6 +427,15 @@ curl -X POST http://localhost:8000/api/v1/balance/variants \
 `variants=[]`、`total=0`；守恒本身无解返回 `422 IMPOSSIBLE_BALANCE`。
 `reaction_id` 与 `/balance`、`/analyze` 采用同一规范化签名（变体结果不写
 入幂等缓存）。
+
+> **跨侧同名物种**：本接口允许同一规范化物种同时出现在反应物与生成物中
+> （如 `{"reactants":["H2","O2"],"products":["H2","H2O"]}`，即净反应中
+> 该物种被部分抵消）。每个方案的系数按“侧别 + 规范化排序位置”与 `vector`
+> 一一对应：跨侧同物种的两侧系数**可以不同且互不覆盖**，
+> `coefficients.reactants` / `coefficients.products` 明细与 `equation`
+> 均严格对应同一个 `vector`（例如 `max_coefficient=5` 的方案
+> `[3,1,1,2]` 渲染为 `3H2 + O2 -> H2 + 2H2O`，反应物 H2 系数为 3、
+> 生成物 H2 系数为 1）。
 
 ### 2.4 批量限量试剂计量 `POST /api/v1/stoichiometry/batch`
 

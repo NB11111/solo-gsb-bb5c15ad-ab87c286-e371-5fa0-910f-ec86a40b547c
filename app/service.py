@@ -98,12 +98,28 @@ def _equation(
     reactants: list[Species],
     products: list[Species],
     coefficient_map: dict[str, int] | None,
+    product_coefficient_map: dict[str, int] | None = None,
 ) -> str:
-    def term(sp: Species) -> str:
-        coef = coefficient_map.get(species_key(sp), 1) if coefficient_map else 1
+    """渲染方程式。
+
+    ``coefficient_map`` 给反应物侧系数；``product_coefficient_map`` 缺省时
+    生成物侧复用同一映射（唯一配平流程两侧物种必不重复）。变体枚举允许同一
+    规范化物种跨侧出现且系数不同，此时必须传入各自独立的侧别映射，否则后写入
+    的一侧会覆盖另一侧的系数。
+    """
+    product_map = (
+        coefficient_map if product_coefficient_map is None else product_coefficient_map
+    )
+
+    def term(sp: Species, coef_map: dict[str, int] | None) -> str:
+        coef = coef_map.get(species_key(sp), 1) if coef_map else 1
         return ("" if coef == 1 else str(coef)) + sp.normalized
 
-    return " + ".join(map(term, reactants)) + " -> " + " + ".join(map(term, products))
+    return (
+        " + ".join(term(sp, coefficient_map) for sp in reactants)
+        + " -> "
+        + " + ".join(term(sp, product_map) for sp in products)
+    )
 
 
 def _normalized_block(
@@ -135,6 +151,20 @@ def _coef_map(solved) -> dict[str, int]:
     return {
         species_key(sp): coef
         for sp, coef in zip(solved.all_species, solved.coefficients)
+    }
+
+
+def _side_coef_map(
+    side: list[Species], vector: list[int] | tuple[int, ...], offset: int
+) -> dict[str, int]:
+    """按侧别与排序后位置（vector[offset:offset+len(side)]）保留系数。
+
+    同侧经 parse_side 去重后规范键唯一，可安全按键索引；跨侧同物种互不影响
+    （同一物种在反应物与生成物中可有不同系数）。
+    """
+    return {
+        species_key(sp): vector[offset + i]
+        for i, sp in enumerate(side)
     }
 
 
@@ -415,20 +445,25 @@ def process_variants(
     page = variant_set.coefficients[:limit]
 
     items: list[dict[str, Any]] = []
+    n_reactants = len(reactants)
     for vec in page:
-        coefficient_map = {
-            species_key(sp): coef
-            for sp, coef in zip((*reactants, *products), vec)
-        }
+        # 系数必须按“侧别 + 规范化排序位置”保留：同一规范化物种可能同时
+        # 出现在反应两侧（如 H2 既是反应物又是生成物），两侧系数可以不同，
+        # 共用一张键映射会让后写入的一侧覆盖另一侧，导致明细与 equation
+        # 和 vector 不对应、展示方程不守恒。
+        reactant_map = _side_coef_map(reactants, vec, 0)
+        product_map = _side_coef_map(products, vec, n_reactants)
         items.append(
             {
                 "coefficients": {
-                    "reactants": _species_coefficients(reactants, coefficient_map),
-                    "products": _species_coefficients(products, coefficient_map),
+                    "reactants": _species_coefficients(reactants, reactant_map),
+                    "products": _species_coefficients(products, product_map),
                     "vector": list(vec),
                 },
                 "sum": sum(vec),
-                "equation": _equation(reactants, products, coefficient_map),
+                "equation": _equation(
+                    reactants, products, reactant_map, product_map
+                ),
             }
         )
 

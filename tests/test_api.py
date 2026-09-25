@@ -433,6 +433,108 @@ def test_variants_reaction_id_matches_balance_endpoint():
     assert balance["reaction_id"] == variants["reaction_id"]
 
 
+def test_variants_cross_side_same_species_keeps_separate_coefficients():
+    """H2 同时出现在反应两侧：reactants/products 明细与 equation 必须各自
+    对应 vector 的位置，跨侧同物种系数不同也不能相互覆盖。"""
+    resp = client.post(
+        "/api/v1/balance/variants",
+        json={
+            "reactants": ["H2", "O2"],
+            "products": ["H2", "H2O"],
+            "max_coefficient": 5,
+            "limit": 100,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["normalized"] == {
+        "reactants": ["H2", "O2"],
+        "products": ["H2", "H2O"],
+        "equation": "H2 + O2 -> H2 + H2O",
+    }
+    assert data["total"] == data["count"] == 4
+    assert data["truncated"] is False
+
+    atom_counts = {
+        "H2": {"H": 2},
+        "O2": {"O": 2},
+        "H2O": {"H": 2, "O": 1},
+    }
+    expected_equations = [
+        "3H2 + O2 -> H2 + 2H2O",
+        "4H2 + O2 -> 2H2 + 2H2O",
+        "5H2 + O2 -> 3H2 + 2H2O",
+        "5H2 + 2O2 -> H2 + 4H2O",
+    ]
+    for item, expected_equation in zip(data["variants"], expected_equations):
+        reactants = item["coefficients"]["reactants"]
+        products = item["coefficients"]["products"]
+        vector = item["coefficients"]["vector"]
+
+        # 明细顺序与规范化后的侧别顺序一致
+        assert [x["normalized"] for x in reactants] == ["H2", "O2"]
+        assert [x["normalized"] for x in products] == ["H2", "H2O"]
+
+        # 明细系数与 vector 按位置一一对应（反应物 H2 的系数不被生成物 H2 覆盖）
+        side_coefficients = [x["coefficient"] for x in reactants] + [
+            x["coefficient"] for x in products
+        ]
+        assert side_coefficients == vector
+
+        # equation 与明细完全一致
+        assert item["equation"] == expected_equation
+
+        # 展示方程逐元素守恒
+        def side_totals(side):
+            totals = {}
+            for x in side:
+                for element, count in atom_counts[x["normalized"]].items():
+                    totals[element] = totals.get(element, 0) + x["coefficient"] * count
+            return totals
+
+        assert side_totals(reactants) == side_totals(products)
+
+    # 问题示例：vector [3,1,1,2] 中反应物 H2 必须显示为 3
+    first = data["variants"][0]["coefficients"]
+    assert first["vector"] == [3, 1, 1, 2]
+    assert first["reactants"][0] == {
+        "input": "H2",
+        "normalized": "H2",
+        "coefficient": 3,
+    }
+    assert first["products"][0] == {
+        "input": "H2",
+        "normalized": "H2",
+        "coefficient": 1,
+    }
+
+
+def test_variants_cross_side_same_species_limit_truncation():
+    """跨侧同物种方案同样遵守总数、排序与 limit 截取语义。"""
+    resp = client.post(
+        "/api/v1/balance/variants",
+        json={
+            "reactants": ["H2", "O2"],
+            "products": ["H2", "H2O"],
+            "max_coefficient": 5,
+            "limit": 2,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["count"] == 2
+    assert data["truncated"] is True
+    assert [v["coefficients"]["vector"] for v in data["variants"]] == [
+        [3, 1, 1, 2],
+        [4, 1, 2, 2],
+    ]
+    assert [v["equation"] for v in data["variants"]] == [
+        "3H2 + O2 -> H2 + 2H2O",
+        "4H2 + O2 -> 2H2 + 2H2O",
+    ]
+
+
 def test_balance_endpoint_unchanged_payload_shape():
     # 回归保护：/balance 的字段与缓存语义不受新接口影响
     resp = client.post(
