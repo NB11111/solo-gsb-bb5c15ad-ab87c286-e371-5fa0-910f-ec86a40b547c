@@ -343,6 +343,72 @@ def test_variants_no_positive_solution_empty_list():
     assert data["truncated"] is False
 
 
+def test_variants_cross_side_same_species_keeps_positional_coefficients():
+    """跨侧同物种（反应物 H2 与生成物 H2）的系数不得相互覆盖。
+
+    每个方案的 reactants / products 明细与 equation 都必须按侧别和规范化
+    排序后的位置与 vector 一一对应；两侧同物种可以有不同系数。
+    """
+    resp = client.post(
+        "/api/v1/balance/variants",
+        json={
+            "reactants": ["H2", "O2"],
+            "products": ["H2", "H2O"],
+            "max_coefficient": 5,
+            "limit": 10,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["normalized"]["reactants"] == ["H2", "O2"]
+    assert data["normalized"]["products"] == ["H2", "H2O"]
+    # 归一化块不携带系数，保持物种清单语义
+    assert data["normalized"]["equation"] == "H2 + O2 -> H2 + H2O"
+
+    vectors = [v["coefficients"]["vector"] for v in data["variants"]]
+    assert vectors == [[3, 1, 1, 2], [4, 1, 2, 2], [5, 1, 3, 2], [5, 2, 1, 4]]
+    assert data["total"] == data["count"] == 4
+    assert data["truncated"] is False
+
+    first = data["variants"][0]
+    assert first["coefficients"]["reactants"] == [
+        {"input": "H2", "normalized": "H2", "coefficient": 3},
+        {"input": "O2", "normalized": "O2", "coefficient": 1},
+    ]
+    assert first["coefficients"]["products"] == [
+        {"input": "H2", "normalized": "H2", "coefficient": 1},
+        {"input": "H2O", "normalized": "H2O", "coefficient": 2},
+    ]
+    assert first["equation"] == "3H2 + O2 -> H2 + 2H2O"
+
+    # 每个方案的明细与方程都与 vector 一一对应，且展示方程守恒
+    composition = {
+        "H2": {"H": 2},
+        "O2": {"O": 2},
+        "H2O": {"H": 2, "O": 1},
+    }
+    order = ["H2", "O2", "H2", "H2O"]
+    for item in data["variants"]:
+        vec = item["coefficients"]["vector"]
+        detail = [
+            entry["coefficient"]
+            for entry in (
+                item["coefficients"]["reactants"] + item["coefficients"]["products"]
+            )
+        ]
+        assert detail == vec
+        for element in ("H", "O"):
+            left = sum(
+                coef * composition[sp].get(element, 0)
+                for coef, sp in zip(vec[:2], order[:2])
+            )
+            right = sum(
+                coef * composition[sp].get(element, 0)
+                for coef, sp in zip(vec[2:], order[2:])
+            )
+            assert left == right, item["equation"]
+
+
 def test_variants_space_too_large():
     resp = client.post(
         "/api/v1/balance/variants",

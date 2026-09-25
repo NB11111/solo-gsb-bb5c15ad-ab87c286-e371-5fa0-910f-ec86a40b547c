@@ -365,6 +365,14 @@ curl -X POST http://localhost:8000/api/v1/analyze \
 并用 `truncated` 标识是否发生截取。唯一配平的反应同样适用，返回只含单个
 方案的列表。
 
+每个方案的系数按**侧别 + 规范排序后的侧内位置**与 `vector` 一一对应：
+`reactants` / `products` 明细与 `equation` 都严格跟随 `vector` 的分段
+（前段为反应物、后段为生成物）。同一物种允许同时出现在两侧（如反应物
+`H2` 与生成物 `H2`），两侧系数各自独立、互不影响——例如
+`{"reactants":["H2","O2"],"products":["H2","H2O"],"max_coefficient":5}`
+会给出方案 `3H2 + O2 -> H2 + 2H2O`（`vector` 为 `[3, 1, 1, 2]`，反应物
+`H2` 的系数是 3，生成物 `H2` 的系数是 1）。
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/balance/variants \
   -H 'Content-Type: application/json' \

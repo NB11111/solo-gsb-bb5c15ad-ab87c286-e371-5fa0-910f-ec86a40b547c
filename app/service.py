@@ -97,38 +97,64 @@ def _parse_all(
 def _equation(
     reactants: list[Species],
     products: list[Species],
-    coefficient_map: dict[str, int] | None,
+    reactant_coefficients: list[int] | None = None,
+    product_coefficients: list[int] | None = None,
 ) -> str:
-    def term(sp: Species) -> str:
-        coef = coefficient_map.get(species_key(sp), 1) if coefficient_map else 1
-        return ("" if coef == 1 else str(coef)) + sp.normalized
+    """拼接反应方程式。
 
-    return " + ".join(map(term, reactants)) + " -> " + " + ".join(map(term, products))
+    系数按**侧别 + 侧内位置**与物种一一对应（与配平向量的分段顺序一致），
+    因此跨侧同物种在两侧可以有不同系数、互不覆盖；缺省（None）时该侧
+    全部按系数 1 展示。
+    """
+
+    def terms(side: list[Species], coefficients: list[int] | None) -> str:
+        parts = []
+        for index, sp in enumerate(side):
+            coef = coefficients[index] if coefficients is not None else 1
+            parts.append(("" if coef == 1 else str(coef)) + sp.normalized)
+        return " + ".join(parts)
+
+    return (
+        terms(reactants, reactant_coefficients)
+        + " -> "
+        + terms(products, product_coefficients)
+    )
 
 
 def _normalized_block(
     reactants: list[Species],
     products: list[Species],
-    coefficient_map: dict[str, int] | None,
+    reactant_coefficients: list[int] | None = None,
+    product_coefficients: list[int] | None = None,
 ) -> dict[str, Any]:
     return {
         "reactants": [sp.normalized for sp in reactants],
         "products": [sp.normalized for sp in products],
-        "equation": _equation(reactants, products, coefficient_map),
+        "equation": _equation(
+            reactants, products, reactant_coefficients, product_coefficients
+        ),
     }
 
 
 def _species_coefficients(
-    side: list[Species], coefficient_map: dict[str, int]
+    side: list[Species], coefficients: list[int]
 ) -> list[dict[str, Any]]:
+    """一侧的系数明细：系数按侧内位置与物种一一对应。"""
     return [
         {
             "input": sp.raw,
             "normalized": sp.normalized,
-            "coefficient": coefficient_map[species_key(sp)],
+            "coefficient": coefficients[index],
         }
-        for sp in side
+        for index, sp in enumerate(side)
     ]
+
+
+def _side_coefficients(
+    side: list[Species], coefficient_map: dict[str, int]
+) -> list[int]:
+    """按侧内顺序从（规范键 -> 系数）映射中取出各物种系数。"""
+    return [coefficient_map[species_key(sp)] for sp in side]
 
 
 def _coef_map(solved) -> dict[str, int]:
@@ -217,22 +243,26 @@ def build_balance_payload(
     cached: bool,
 ) -> dict[str, Any]:
     coefficient_map = record.coefficients
+    reactant_coefficients = _side_coefficients(reactants, coefficient_map)
+    product_coefficients = _side_coefficients(products, coefficient_map)
     charge_left = sum(
-        coefficient_map[species_key(sp)] * sp.formula.charge for sp in reactants
+        coef * sp.formula.charge
+        for sp, coef in zip(reactants, reactant_coefficients)
     )
     charge_right = sum(
-        coefficient_map[species_key(sp)] * sp.formula.charge for sp in products
+        coef * sp.formula.charge
+        for sp, coef in zip(products, product_coefficients)
     )
     return {
         "reaction_id": record.reaction_id,
         "cached": cached,
-        "normalized": _normalized_block(reactants, products, coefficient_map),
+        "normalized": _normalized_block(
+            reactants, products, reactant_coefficients, product_coefficients
+        ),
         "coefficients": {
-            "reactants": _species_coefficients(reactants, coefficient_map),
-            "products": _species_coefficients(products, coefficient_map),
-            "vector": [
-                coefficient_map[species_key(sp)] for sp in (*reactants, *products)
-            ],
+            "reactants": _species_coefficients(reactants, reactant_coefficients),
+            "products": _species_coefficients(products, product_coefficients),
+            "vector": [*reactant_coefficients, *product_coefficients],
         },
         "balanced": True,
         "elements": list(record.elements),
@@ -289,13 +319,18 @@ def process_analyze(
             )
 
     raw = build_raw_view(reactants, products, elements)
+    if record.error is None:
+        balanced_r_coefs = _side_coefficients(reactants, record.coefficients)
+        balanced_p_coefs = _side_coefficients(products, record.coefficients)
+    else:
+        balanced_r_coefs = balanced_p_coefs = None
     payload: dict[str, Any] = {
         "reaction_id": record.reaction_id,
         "cached": cached,
         "normalized": _normalized_block(
-            reactants, products, None if record.error else record.coefficients
+            reactants, products, balanced_r_coefs, balanced_p_coefs
         ),
-        "raw": _view(reactants, products, raw, coefficient_map=None, assumed=1),
+        "raw": _view(reactants, products, raw, assumed=1),
         "balanced_ok": record.error is None,
         "error": record.error,
     }
@@ -309,8 +344,8 @@ def process_analyze(
             reactants,
             products,
             balanced_view,
-            coefficient_map=record.coefficients,
-            assumed=None,
+            reactant_coefficients=balanced_r_coefs,
+            product_coefficients=balanced_p_coefs,
         )
     else:
         payload["balanced"] = None
@@ -322,14 +357,19 @@ def _view(
     products: list[Species],
     view: dict[str, Any],
     *,
-    coefficient_map: dict[str, int] | None,
-    assumed: int | None,
+    reactant_coefficients: list[int] | None = None,
+    product_coefficients: list[int] | None = None,
+    assumed: int | None = None,
 ) -> dict[str, Any]:
-    def side_block(side: list[Species]) -> list[dict[str, Any]]:
+    def side_block(
+        side: list[Species], coefficients: list[int] | None
+    ) -> list[dict[str, Any]]:
         block = []
-        for sp in side:
+        for index, sp in enumerate(side):
             coef = (
-                coefficient_map[species_key(sp)] if coefficient_map else (assumed or 1)
+                coefficients[index]
+                if coefficients is not None
+                else (assumed or 1)
             )
             block.append(
                 {"input": sp.raw, "normalized": sp.normalized, "coefficient": coef}
@@ -338,8 +378,8 @@ def _view(
 
     result: dict[str, Any] = {
         "species": {
-            "reactants": side_block(reactants),
-            "products": side_block(products),
+            "reactants": side_block(reactants, reactant_coefficients),
+            "products": side_block(products, product_coefficients),
         },
         "elements": view["elements"],
         "charge": view["charge"],
@@ -414,27 +454,34 @@ def process_variants(
     total = len(variant_set.coefficients)
     page = variant_set.coefficients[:limit]
 
+    # 系数按侧别 + 规范排序后的侧内位置从向量中分段取出，与物种一一对应；
+    # 跨侧同物种（如反应物 H2 与生成物 H2）各有独立系数，互不覆盖。
+    n_reactants = len(reactants)
     items: list[dict[str, Any]] = []
     for vec in page:
-        coefficient_map = {
-            species_key(sp): coef
-            for sp, coef in zip((*reactants, *products), vec)
-        }
+        reactant_coefficients = list(vec[:n_reactants])
+        product_coefficients = list(vec[n_reactants:])
         items.append(
             {
                 "coefficients": {
-                    "reactants": _species_coefficients(reactants, coefficient_map),
-                    "products": _species_coefficients(products, coefficient_map),
+                    "reactants": _species_coefficients(
+                        reactants, reactant_coefficients
+                    ),
+                    "products": _species_coefficients(
+                        products, product_coefficients
+                    ),
                     "vector": list(vec),
                 },
                 "sum": sum(vec),
-                "equation": _equation(reactants, products, coefficient_map),
+                "equation": _equation(
+                    reactants, products, reactant_coefficients, product_coefficients
+                ),
             }
         )
 
     return 200, {
         "reaction_id": reaction_id,
-        "normalized": _normalized_block(reactants, products, None),
+        "normalized": _normalized_block(reactants, products),
         "max_coefficient": max_coefficient,
         "limit": limit,
         "nullity": variant_set.nullity,
